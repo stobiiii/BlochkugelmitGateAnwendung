@@ -2,6 +2,22 @@ import streamlit as st
 import numpy as np
 import plotly.graph_objects as go
 
+# Set page config
+st.set_page_config(page_title="White Background", layout="wide")
+
+# Inject custom CSS to set background color
+st.markdown(
+    """
+    <style>
+    body {
+        background-color: white;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
+
 st.set_page_config(layout="wide")
 st.title("Blochkugel mit Gate-Anwendung")
 
