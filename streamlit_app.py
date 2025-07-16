@@ -1,151 +1,213 @@
 import streamlit as st
-import pandas as pd
-import math
-from pathlib import Path
+import numpy as np
+import plotly.graph_objects as go
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+st.set_page_config(layout="wide")
+st.title("Blochkugel mit Gate-Anwendung")
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+# --- Hilfsfunktionen für Zustände und Gates ---
+def ket_0():
+    return np.array([1, 0], dtype=complex)
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+def ket_1():
+    return np.array([0, 1], dtype=complex)
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
-    """
+def normalize(state):
+    return state / np.linalg.norm(state)
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+def bloch_vector(state):
+    alpha, beta = state
+    x = 2 * (alpha.conjugate() * beta).real
+    y = 2 * (alpha.conjugate() * beta).imag
+    z = abs(alpha)**2 - abs(beta)**2
+    return np.array([x, y, z])
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+def apply_gate(state, gate):
+    return gate @ state
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
+# --- Standard-Gates ---
+pauli_x = np.array([[0, 1], [1, 0]], dtype=complex)
+pauli_y = np.array([[0, -1j], [1j, 0]], dtype=complex)
+pauli_z = np.array([[1, 0], [0, -1]], dtype=complex)
+hadamard = (1/np.sqrt(2)) * np.array([[1, 1], [1, -1]], dtype=complex)
+
+# --- Rotationen (R_x, R_y, R_z) ---
+def rotation_x(theta):
+    return np.array([
+        [np.cos(theta/2), -1j*np.sin(theta/2)],
+        [-1j*np.sin(theta/2), np.cos(theta/2)]
+    ], dtype=complex)
+
+def rotation_y(theta):
+    return np.array([
+        [np.cos(theta/2), -np.sin(theta/2)],
+        [np.sin(theta/2), np.cos(theta/2)]
+    ], dtype=complex)
+
+def rotation_z(theta):
+    return np.array([
+        [np.exp(-1j*theta/2), 0],
+        [0, np.exp(1j*theta/2)]
+    ], dtype=complex)
+
+# --- Initialisierung ---
+if "state" not in st.session_state:
+    st.session_state.state = ket_0()
+    st.session_state.traj = [bloch_vector(st.session_state.state)]
+
+def update_state(gate):
+    new_state = normalize(apply_gate(st.session_state.state, gate))
+    st.session_state.state = new_state
+    st.session_state.traj.append(bloch_vector(new_state))
+
+def reset():
+    st.session_state.state = ket_0()
+    st.session_state.traj = [bloch_vector(st.session_state.state)]
+
+# --- UI für Gates und Rotation ---
+col1, col2, col3, col4, col5 = st.columns(5)
+with col1:
+    if st.button("Pauli-X"):
+        update_state(pauli_x)
+with col2:
+    if st.button("Pauli-Y"):
+        update_state(pauli_y)
+with col3:
+    if st.button("Pauli-Z"):
+        update_state(pauli_z)
+with col4:
+    if st.button("Hadamard"):
+        update_state(hadamard)
+with col5:
+    if st.button("Reset"):
+        reset()
+
+# --- Rotation UI ---
+st.markdown("### Rotation anwenden")
+angle_deg = st.slider("Rotationswinkel (in Grad)", min_value=1, max_value=360, value=45, step=1)
+angle_rad = np.deg2rad(angle_deg)
+
+colx, coly, colz = st.columns(3)
+with colx:
+    if st.button("Rotate X"):
+        update_state(rotation_x(angle_rad))
+with coly:
+    if st.button("Rotate Y"):
+        update_state(rotation_y(angle_rad))
+with colz:
+    if st.button("Rotate Z"):
+        update_state(rotation_z(angle_rad))
+
+# --- SLERP ---
+def slerp(v0, v1, num_points=100):
+    v0 = v0 / np.linalg.norm(v0)
+    v1 = v1 / np.linalg.norm(v1)
+    dot = np.clip(np.dot(v0, v1), -1.0, 1.0)
+    theta = np.arccos(dot)
+    if theta < 1e-6:
+        return np.tile(v0, (num_points, 1))
+    if np.isclose(dot, -1.0):
+        orthogonal = np.array([1, 0, 0])
+        if np.allclose(v0, orthogonal) or np.allclose(v0, -orthogonal):
+            orthogonal = np.array([0, 0, 1])
+        axis = np.cross(v0, orthogonal)
+        axis /= np.linalg.norm(axis)
+        t = np.linspace(0, 1, num_points)
+        return np.array([
+            (v0 * np.cos(ti*np.pi) +
+             np.cross(axis, v0) * np.sin(ti*np.pi) +
+             axis * np.dot(axis, v0) * (1 - np.cos(ti*np.pi)))
+            for ti in t
+        ])
+    sin_theta = np.sin(theta)
+    t = np.linspace(0, 1, num_points)
+    return (np.sin((1 - t) * theta)[:, None] * v0 +
+            np.sin(t * theta)[:, None] * v1) / sin_theta
+
+# --- Plot Funktion ---
+def plot_bloch(traj):
+    u = np.linspace(0, 2 * np.pi, 60)
+    v = np.linspace(0, np.pi, 30)
+    x = np.outer(np.cos(u), np.sin(v))
+    y = np.outer(np.sin(u), np.sin(v))
+    z = np.outer(np.ones(np.size(u)), np.cos(v))
+
+    fig = go.Figure()
+    fig.add_trace(go.Surface(x=x, y=y, z=z, opacity=0.3, colorscale='Blues', showscale=False))
+
+    # Achsen
+    for axis, color, label_pos in zip(
+        ['X', 'Y', 'Z'],
+        ['black', 'black', 'black'],
+        [([-1.2, 1.2], [0, 0], [0, 0]),
+         ([0, 0], [-1.2, 1.2], [0, 0]),
+         ([0, 0], [0, 0], [-1.2, 1.2])]
+    ):
+        fig.add_trace(go.Scatter3d(
+            x=label_pos[0], y=label_pos[1], z=label_pos[2],
+            mode='lines+text', text=[f"-{axis}", f"+{axis}"], textposition='top center',
+            line=dict(color=color, width=5)
+        ))
+
+    # Basiszustände
+    labels = [
+        (0, 0, 1.6, "|0⟩"),
+        (0, 0, -1.6, "|1⟩"),
+        (1.5, 0, 0, "|+⟩"),
+        (-1.5, 0, 0, "|−⟩"),
+        (0, 1.5, 0, "|i⟩"),
+        (0, -1.5, 0, "|−i⟩"),
+    ]
+    for x, y, z, label in labels:
+        fig.add_trace(go.Scatter3d(x=[x], y=[y], z=[z],
+                                   mode='text', text=[label],
+                                   textposition='middle center',
+                                   textfont=dict(size=18, color='black')))
+
+    # Slerp Linie
+    traj = np.array(traj)
+    if len(traj) >= 2:
+        arc_points = slerp(traj[-2], traj[-1])
+        fig.add_trace(go.Scatter3d(
+            x=arc_points[:, 0], y=arc_points[:, 1], z=arc_points[:, 2],
+            mode='lines', line=dict(color='blue', width=6)
+        ))
+
+    # Vektor
+    v = traj[-1]
+    fig.add_trace(go.Scatter3d(
+        x=[0, v[0]], y=[0, v[1]], z=[0, v[2]],
+        mode='lines+markers+text',
+        line=dict(color='red', width=10),
+        marker=dict(size=5, color='red'),
+        text=["", "ψ"], textposition='top center'
+    ))
+
+    fig.update_layout(
+        scene=dict(
+            xaxis=dict(title='X', range=[-2, 2], zeroline=False),
+            yaxis=dict(title='Y', range=[-2, 2], zeroline=False),
+            zaxis=dict(title='Z', range=[-2, 2], zeroline=False),
+            aspectmode='cube'
+        ),
+        margin=dict(l=0, r=0, t=30, b=0),
+        paper_bgcolor='white',
+        plot_bgcolor='white',
+        showlegend=False
     )
+    return fig
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
+# --- Zustand anzeigen ---
+state = st.session_state.state
+alpha, beta = state
+alpha_str = f"{alpha.real:.3f}" + (f" + {alpha.imag:.3f}i" if abs(alpha.imag) > 1e-6 else "")
+beta_str = f"{beta.real:.3f}" + (f" + {beta.imag:.3f}i" if abs(beta.imag) > 1e-6 else "")
+st.markdown(f"**Aktueller Zustand |ψ⟩:**  \n"
+            f"|ψ⟩ = ({alpha_str}) |0⟩ + ({beta_str}) |1⟩")
 
-    return gdp_df
-
-gdp_df = get_gdp_data()
-
-# -----------------------------------------------------------------------------
-# Draw the actual page
-
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
-]
-
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
+# --- Plot anzeigen ---
+fig = plot_bloch(st.session_state.traj)
+st.plotly_chart(fig, use_container_width=True, height=600)
 
 
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
 
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
-        )
